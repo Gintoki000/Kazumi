@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -14,6 +15,7 @@ import 'package:kazumi/navigation.dart';
 import 'package:kazumi/utils/constants.dart';
 import 'package:kazumi/utils/device.dart';
 import 'package:kazumi/utils/theme.dart';
+import 'package:kazumi/services/sync/webdav.dart';
 
 class AppWidget extends StatefulWidget {
   const AppWidget({super.key});
@@ -28,6 +30,8 @@ class _AppWidgetState extends State<AppWidget>
   bool showingExitDialog = false;
   bool _didApplyStoredThemeSettings = false;
   Brightness? _lastTitleBarBrightness;
+  Timer? _autoSyncTimer;
+  static const Duration _autoSyncInterval = Duration(hours: 1);
 
   @override
   void initState() {
@@ -36,6 +40,7 @@ class _AppWidgetState extends State<AppWidget>
     windowManager.addListener(this);
     WidgetsBinding.instance.addObserver(this);
     _initializePlatformIntegrations();
+    _scheduleAutoSync();
   }
 
   Future<void> _initializePlatformIntegrations() async {
@@ -44,6 +49,48 @@ class _AppWidgetState extends State<AppWidget>
       await _handleTray();
     }
     await _configurePreferredDisplayMode();
+  }
+
+  /// 定时自动同步 WebDAV（收藏 + 观看记录）
+  /// 仅在桌面端生效，每小时执行一次
+  void _scheduleAutoSync() {
+    _autoSyncTimer?.cancel();
+    if (!isDesktop()) return;
+
+    _autoSyncTimer = Timer.periodic(_autoSyncInterval, (_) {
+      _performAutoSync();
+    });
+  }
+
+  Future<void> _performAutoSync() async {
+    final webDavEnable = GStorage.getSetting(SettingsKeys.webDavEnable);
+    if (webDavEnable != true) return;
+
+    final historySyncEnable =
+        GStorage.getSetting(SettingsKeys.webDavEnableHistory);
+    final collectSyncEnable =
+        GStorage.getSetting(SettingsKeys.webDavEnableCollect);
+
+    if (historySyncEnable != true && collectSyncEnable != true) return;
+
+    try {
+      final webDav = WebDav();
+      if (!webDav.initialized) {
+        await webDav.init();
+      }
+
+      if (historySyncEnable == true) {
+        KazumiLogger().i('AutoSync: syncing history');
+        await webDav.syncHistory();
+      }
+
+      if (collectSyncEnable == true) {
+        KazumiLogger().i('AutoSync: syncing collectibles');
+        await webDav.syncCollectibles();
+      }
+    } catch (e) {
+      KazumiLogger().w('AutoSync: sync failed', error: e);
+    }
   }
 
   Future<void> _configurePreferredDisplayMode() async {
@@ -71,6 +118,7 @@ class _AppWidgetState extends State<AppWidget>
 
   @override
   void dispose() {
+    _autoSyncTimer?.cancel();
     trayManager.removeListener(this);
     windowManager.removeListener(this);
     WidgetsBinding.instance.removeObserver(this);
@@ -268,6 +316,8 @@ class _AppWidgetState extends State<AppWidget>
     } else if (state == AppLifecycleState.resumed) {
       KazumiLogger()
           .i("AppLifecycleState.resumed: Application moved to foreground");
+      _performAutoSync();
+      _scheduleAutoSync();
     } else if (state == AppLifecycleState.inactive) {
       KazumiLogger().i("AppLifecycleState.inactive: Application is inactive");
     }
